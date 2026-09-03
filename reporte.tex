@@ -1,0 +1,422 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[hidelinks]{hyperref}
+
+\graphicspath{{figuras/}}
+\emergencystretch=1em
+
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  commentstyle=\color{gray}\itshape,
+  keywordstyle=\color{blue!60!black},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  frame=single,
+  breaklines=true,
+  showstringspaces=false,
+  inputencoding=utf8,
+  extendedchars=true
+}
+
+\begin{document}
+
+\begin{center}
+  {\LARGE\bfseries Implementación manual de K-Means sobre datos de tracking de jugadores de la NFL\par}
+  \vspace{0.8em}
+  {\large Momento de Retroalimentación: Módulo 2 --- Implementación de una técnica de aprendizaje máquina sin el uso de un framework (Portafolio Implementación)\par}
+  \vspace{1.2em}
+  Karol Alexis Alvarado Davila --- A01751711\\[0.3em]
+  Inteligencia artificial avanzada para la ciencia de datos\\[0.3em]
+  Grupo TC3009C.601\\[0.3em]
+  Tecnológico de Monterrey\\[0.3em]
+  Miércoles 2 de septiembre de 2026
+\end{center}
+
+\vspace{1em}
+
+\section{Descripción del dataset}
+
+El dataset que usé es de tracking de jugadores de la NFL (archivo \texttt{input\_2023\_w01.csv}), que corresponde a la semana 1 de la temporada 2023. Tiene 285{,}714 registros y 23 columnas, sin valores nulos. Cada registro es un instante (frame) de un jugador dentro de una jugada, así que un mismo jugador aparece muchas veces: en total hay 16 partidos, 819 jugadas y 737 jugadores distintos, con unos 28 frames por jugador en cada jugada.
+
+Las columnas se pueden agrupar así:
+
+\begin{itemize}
+  \item Identificadores: \texttt{game\_id}, \texttt{play\_id}, \texttt{nfl\_id}, \texttt{frame\_id}.
+  \item Datos del jugador: \texttt{player\_name}, \texttt{player\_height}, \texttt{player\_weight}, \texttt{player\_birth\_date}, \texttt{player\_position}, \texttt{player\_side}, \texttt{player\_role}.
+  \item Contexto de la jugada: \texttt{play\_direction}, \texttt{absolute\_yardline\_number}, \texttt{player\_to\_predict}, \texttt{num\_frames\_output}, \texttt{ball\_land\_x}, \texttt{ball\_land\_y}.
+  \item Movimiento del jugador en ese instante: \texttt{x}, \texttt{y} (posición en el campo, en yardas), \texttt{s} (velocidad, yd/s), \texttt{a} (aceleración, yd/s$^2$), \texttt{dir} (dirección del movimiento, en grados) y \texttt{o} (orientación del cuerpo, en grados).
+\end{itemize}
+
+\section{Variables utilizadas y justificación}
+
+Para el clustering usé solamente dos variables: la velocidad \texttt{s} y la aceleración \texttt{a}. En el Cuadro~\ref{tab:vars} está el resumen estadístico de las dos en el dataset completo.
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{lrrrrr}
+    \toprule
+    Variable & Media & Desv. est. & Mín. & Mediana & Máx. \\
+    \midrule
+    \texttt{s} (yd/s)     & 3.04 & 2.23 & 0 & 2.73 & 12.53 \\
+    \texttt{a} (yd/s$^2$) & 2.13 & 1.43 & 0 & 1.92 & 17.12 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Estadísticas de las variables utilizadas (285{,}714 registros).}
+  \label{tab:vars}
+\end{table}
+
+La razón es que K-Means agrupa por distancias, así que las variables tienen que ser numéricas y tener un significado que valga la pena comparar. Con eso en mente, descarté las demás:
+
+\begin{itemize}
+  \item \texttt{game\_id}, \texttt{play\_id}, \texttt{nfl\_id} y \texttt{frame\_id} son identificadores. Aunque sean números, la distancia entre dos ids no significa nada.
+  \item \texttt{x} y \texttt{y} indican \emph{dónde} está el jugador en el campo, y eso depende de en qué yarda empieza la jugada y hacia qué lado se juega, no de cómo se mueve. Si las hubiera incluido, K-Means habría agrupado por zona del campo en lugar de por tipo de movimiento.
+  \item \texttt{dir} y \texttt{o} son ángulos de 0 a 360 grados. Con la distancia euclidiana que vimos en clase, 359$^\circ$ y 1$^\circ$ quedan muy lejos aunque en realidad sean casi la misma dirección, así que no son apropiadas para este algoritmo tal cual.
+  \item \texttt{player\_weight} y \texttt{player\_height} son características fijas del jugador, no del movimiento.
+  \item \texttt{player\_role}, \texttt{player\_position}, \texttt{player\_side} y \texttt{play\_direction} son categorías. No las convertí a números porque asignarles un número arbitrario inventaría una distancia que no existe.
+\end{itemize}
+
+Entre \texttt{s} y \texttt{a} la correlación es de 0.21, o sea que no representan la misma información: un jugador puede ir rápido sin acelerar, o acelerar desde velocidad cero.
+
+\section{Objetivo del proyecto}
+
+El objetivo es agrupar los registros de tracking según su velocidad y aceleración para encontrar tipos de movimiento parecidos (por ejemplo: jugador detenido, jugador acelerando, jugador corriendo a velocidad alta), y con eso demostrar que mi implementación manual de K-Means funciona. Es un problema de clustering, no de clasificación: no hay una etiqueta correcta que predecir, el algoritmo tiene que descubrir los grupos por su cuenta.
+
+\section{K-Means}
+
+K-Means es un algoritmo de aprendizaje no supervisado, de tipo centroide: cada cluster está representado por un centroide y cada punto pertenece al cluster cuyo centroide le queda más cerca. Lo que trata de minimizar es la inercia, que es la suma de las distancias al cuadrado de cada punto a su centroide. Los pasos, tal como los vimos en clase, son:
+
+\begin{enumerate}
+  \item Elegir el número de clusters $K$.
+  \item Tomar $K$ puntos aleatorios del dataset como centroides iniciales.
+  \item Asignar cada punto al centroide más cercano.
+  \item Calcular los nuevos centroides como el promedio de los puntos de cada cluster.
+  \item Repetir los pasos 3 y 4 hasta cumplir un criterio de paro.
+\end{enumerate}
+
+Como criterio de paro usé los dos que vimos: que los centroides ya no cambien o que se llegue a un máximo de iteraciones. Para la distancia usé la euclidiana, que para dos puntos $P_1 = (x_1, \ldots, x_n)$ y $P_2 = (y_1, \ldots, y_n)$ es
+\[
+  D(P_1, P_2) = \sqrt{\sum_{i=1}^{n} (x_i - y_i)^2}.
+\]
+
+\section{Implementación manual}
+
+Todo lo que es K-Means está programado desde cero en \texttt{proyecto.py}, con funciones sencillas, ciclos \texttt{for} y listas. No importé \texttt{sklearn.cluster} ni ninguna función que haga parte del algoritmo. Las funciones son:
+
+\begin{itemize}
+  \item \texttt{distancia(p1, p2)}: distancia euclidiana entre dos puntos.
+  \item \texttt{centroides\_iniciales(datos, k)}: toma los primeros $k$ puntos del conjunto de entrenamiento. Como \texttt{train\_test\_split} ya revolvió los datos, esos $k$ puntos son puntos aleatorios del dataset, que es lo que pide el algoritmo.
+  \item \texttt{asignar\_clusters(datos, centroides)}: calcula la distancia de cada punto a todos los centroides y lo asigna al más cercano. Esta misma función es la que uso después para asignar los datos de prueba.
+  \item \texttt{calcular\_centroides(datos, asignaciones, centroides)}: saca el promedio de los puntos de cada cluster.
+  \item \texttt{inercia(datos, asignaciones, centroides)}: suma de distancias al cuadrado de cada punto a su centroide.
+  \item \texttt{kmeans(datos, k, max\_iteraciones)}: junta todo en un ciclo \texttt{while} que se detiene cuando los centroides ya no cambian o se llega al máximo de iteraciones.
+  \item \texttt{indice\_dunn(datos, asignaciones, centroides)}: métrica de separación entre clusters (ver Sección~\ref{sec:metricas}).
+\end{itemize}
+
+Lo que no es K-Means lo hice con las herramientas que usamos en clase: \texttt{pandas} para leer el CSV y seleccionar columnas, \texttt{StandardScaler} de \texttt{sklearn} para estandarizar, \texttt{train\_test\_split} para separar entrenamiento y prueba, y \texttt{matplotlib} para las gráficas. El Cuadro~\ref{tab:manual} resume qué parte es manual y qué parte usa herramientas.
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{p{9.3cm}p{5.2cm}}
+    \toprule
+    Parte del proyecto & Cómo se hizo \\
+    \midrule
+    Leer el CSV, explorar y seleccionar \texttt{s} y \texttt{a} & \texttt{pandas} (visto en clase) \\
+    Tomar la muestra (1 de cada 50 registros) & slicing de \texttt{pandas} \\
+    Estandarizar las variables & \texttt{StandardScaler} (visto en clase) \\
+    Separar entrenamiento y prueba & \texttt{train\_test\_split} (visto en clase) \\
+    Centroides iniciales, distancias, asignación, actualización, iteraciones, paro & \textbf{manual} \\
+    Asignación de los datos de prueba a un cluster & \textbf{manual} \\
+    Inercia, método del codo e índice de Dunn & \textbf{manual} \\
+    Gráficas & \texttt{matplotlib} (visto en clase) \\
+    \bottomrule
+  \end{tabular}
+  \caption{Qué se implementó manualmente y qué usa herramientas vistas en clase.}
+  \label{tab:manual}
+\end{table}
+
+Estas son las funciones principales del algoritmo, tal como están en \texttt{proyecto.py}:
+
+\begin{lstlisting}
+def distancia(p1, p2):
+    # distancia euclidiana
+    suma = 0
+    for i in range(len(p1)):
+        suma = suma + (p1[i] - p2[i]) ** 2
+    return suma ** 0.5
+
+def asignar_clusters(datos, centroides):
+    # cada punto se va al centroide mas cercano
+    asignaciones = []
+    for punto in datos:
+        cluster_cercano = 0
+        distancia_minima = distancia(punto, centroides[0])
+        for j in range(1, len(centroides)):
+            d = distancia(punto, centroides[j])
+            if d < distancia_minima:
+                distancia_minima = d
+                cluster_cercano = j
+        asignaciones.append(cluster_cercano)
+    return asignaciones
+
+def calcular_centroides(datos, asignaciones, centroides):
+    # el nuevo centroide es el promedio de los puntos del cluster
+    k = len(centroides)
+    dimensiones = len(datos[0])
+    nuevos_centroides = []
+    for j in range(k):
+        suma = [0] * dimensiones
+        cuenta = 0
+        for i in range(len(datos)):
+            if asignaciones[i] == j:
+                for d in range(dimensiones):
+                    suma[d] = suma[d] + datos[i][d]
+                cuenta = cuenta + 1
+        if cuenta > 0:
+            promedio = []
+            for d in range(dimensiones):
+                promedio.append(suma[d] / cuenta)
+            nuevos_centroides.append(promedio)
+        else:
+            # cluster vacio, se queda el centroide anterior
+            nuevos_centroides.append(centroides[j])
+    return nuevos_centroides
+
+def kmeans(datos, k, max_iteraciones):
+    centroides = centroides_iniciales(datos, k)
+    historial_inercia = []
+    iteracion = 0
+    while True:
+        asignaciones = asignar_clusters(datos, centroides)
+        nuevos_centroides = calcular_centroides(datos, asignaciones, centroides)
+        iteracion = iteracion + 1
+        historial_inercia.append(inercia(datos, asignaciones, centroides))
+        # paro cuando los centroides ya no cambian o se acaban las iteraciones
+        if nuevos_centroides == centroides or iteracion == max_iteraciones:
+            break
+        centroides = nuevos_centroides
+    asignaciones = asignar_clusters(datos, centroides)
+    return centroides, asignaciones, historial_inercia
+\end{lstlisting}
+
+\section{Datos de entrenamiento y datos de prueba}
+
+\subsection{Muestra}
+
+El dataset original tiene 285{,}714 registros. Como K-Means está programado con ciclos \texttt{for}, correrlo con todos los registros (y además varias veces para el método del codo) sería muy lento sin que el resultado cambie en nada importante, porque lo que quiero es demostrar que el algoritmo funciona. Por eso tomé una muestra de 1 registro de cada 50 usando slicing (\texttt{df[::50]}), lo que da 5{,}715 registros repartidos entre los 16 partidos del archivo.
+
+\subsection{Escalamiento}
+
+Como K-Means usa distancias, estandaricé las dos variables con \texttt{StandardScaler}, igual que en clase (media 0 y desviación estándar 1). Así ninguna de las dos pesa más que la otra solo por tener valores más grandes.
+
+\subsection{Separación}
+
+Separé la muestra con \texttt{train\_test\_split} en 80\,\% para entrenamiento y 20\,\% para prueba, con \texttt{random\_state=1} para que el resultado sea el mismo cada vez que se corre el programa (Cuadro~\ref{tab:split}).
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{lr}
+    \toprule
+    Conjunto & Registros \\
+    \midrule
+    Dataset original & 285{,}714 \\
+    Muestra (1 de cada 50) & 5{,}715 \\
+    Entrenamiento (80\,\%) & 4{,}572 \\
+    Prueba (20\,\%) & 1{,}143 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Datos utilizados para entrenar y para probar.}
+  \label{tab:split}
+\end{table}
+
+El conjunto de \textbf{entrenamiento} se usó para todo lo que es aprender: el método del codo y el cálculo de los centroides finales. El conjunto de \textbf{prueba} no se tocó durante el entrenamiento; solo se usó al final para comprobar cómo asigna el algoritmo datos nuevos a los clusters y para calcular las métricas sobre datos que no había visto.
+
+\section{Número de clusters}
+
+Para escoger $K$ usé el método del codo que vimos en clase: corrí mi K-Means en el conjunto de entrenamiento con $K$ de 1 a 8 y calculé la inercia (WCSS) de cada resultado, con mi propia función (Cuadro~\ref{tab:codo} y Figura~\ref{fig:codo}).
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{crr}
+    \toprule
+    $K$ & Inercia & Iteraciones \\
+    \midrule
+    1 & 9230.56 & 2 \\
+    2 & 5209.84 & 13 \\
+    3 & 3058.87 & 13 \\
+    4 & 2350.02 & 27 \\
+    5 & 1929.28 & 22 \\
+    6 & 1547.74 & 31 \\
+    7 & 1322.72 & 49 \\
+    8 & 1174.64 & 21 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Inercia en el conjunto de entrenamiento para cada valor de $K$.}
+  \label{tab:codo}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.62\textwidth]{codo}
+  \caption{Método del codo: inercia contra número de clusters.}
+  \label{fig:codo}
+\end{figure}
+
+De $K=1$ a $K=2$ la inercia baja 4{,}021 y de $K=2$ a $K=3$ baja 2{,}151, pero de $K=3$ a $K=4$ solo baja 709 y de ahí en adelante las bajadas son cada vez más chicas. El codo está en $K=3$, así que ese fue el valor que usé. Además con 3 clusters la interpretación es directa, como se ve en los resultados.
+
+\section{Resultados del entrenamiento}
+
+Con $K=3$ el algoritmo convergió en 13 iteraciones, es decir, en la iteración 13 los centroides ya no cambiaron. La Figura~\ref{fig:iter} muestra cómo bajó la inercia: casi toda la mejora ocurre en las primeras 3 iteraciones y después se estabiliza.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.62\textwidth]{inercia_iteraciones}
+  \caption{Inercia en cada iteración del entrenamiento con $K=3$.}
+  \label{fig:iter}
+\end{figure}
+
+El Cuadro~\ref{tab:centroides} muestra los centroides finales. La primera parte está en las unidades escaladas con las que trabaja el algoritmo; la segunda es el promedio de \texttt{s} y \texttt{a} de los registros de cada cluster en unidades originales, que es lo que permite interpretarlos.
+
+\begin{table}[H]
+  \centering
+  \small
+  \begin{tabular}{ccrrrl}
+    \toprule
+    Cluster & Centroide escalado $(s, a)$ & Registros & $\bar{s}$ (yd/s) & $\bar{a}$ (yd/s$^2$) & Interpretación \\
+    \midrule
+    0 & $(-0.833,\ -0.688)$ & 1951 & 1.19 & 1.12 & Detenido o caminando \\
+    1 & $(1.172,\ -0.208)$  & 1327 & 5.70 & 1.80 & Corriendo rápido y estable \\
+    2 & $(0.029,\ 1.247)$   & 1294 & 3.13 & 3.87 & Acelerando \\
+    \bottomrule
+  \end{tabular}
+  \caption{Centroides finales y descripción de cada cluster en el conjunto de entrenamiento.}
+  \label{tab:centroides}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.7\textwidth]{clusters_entrenamiento}
+  \caption{Clusters en el conjunto de entrenamiento. Cada color es un cluster y la X negra es su centroide.}
+  \label{fig:train}
+\end{figure}
+
+En la Figura~\ref{fig:train} se ve que los tres grupos quedan en zonas claras del plano velocidad--aceleración: el cluster 0 en la esquina de valores bajos, el cluster 1 a la derecha (velocidad alta, aceleración baja o media) y el cluster 2 arriba (aceleración alta).
+
+\section{Asignación de los datos de prueba}
+
+Para comprobar que el algoritmo puede recibir datos nuevos, tomé los 1{,}143 registros de prueba y los asigné a un cluster con mi función \texttt{asignar\_clusters}, usando los centroides que salieron del entrenamiento (los centroides no se recalculan en esta etapa). El Cuadro~\ref{tab:ejemplos} muestra los primeros 10 registros de prueba con el cluster que les tocó.
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{rrlc}
+    \toprule
+    $s$ (yd/s) & $a$ (yd/s$^2$) & Rol del jugador & Cluster asignado \\
+    \midrule
+    0.65 & 2.60 & Defensive Coverage & 0 \\
+    3.55 & 0.37 & Defensive Coverage & 0 \\
+    6.78 & 3.64 & Other Route Runner & 1 \\
+    2.45 & 2.33 & Passer             & 0 \\
+    1.78 & 3.10 & Defensive Coverage & 2 \\
+    0.18 & 1.80 & Passer             & 0 \\
+    1.45 & 1.53 & Defensive Coverage & 0 \\
+    6.20 & 2.22 & Defensive Coverage & 1 \\
+    1.75 & 1.49 & Defensive Coverage & 0 \\
+    0.89 & 2.13 & Defensive Coverage & 0 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Ejemplos de registros de prueba y el cluster asignado por la implementación manual.}
+  \label{tab:ejemplos}
+\end{table}
+
+Las asignaciones tienen sentido: los registros con velocidad alta (6.78 y 6.20) quedan en el cluster 1, el registro con velocidad media y aceleración alta (1.78, 3.10) queda en el cluster 2, y los que están casi detenidos quedan en el cluster 0. El Cuadro~\ref{tab:reparto} compara cómo se reparten los registros entre clusters en entrenamiento y en prueba, y la Figura~\ref{fig:test} muestra los datos de prueba con su cluster.
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{crrrr}
+    \toprule
+    Cluster & Entrenamiento & \% & Prueba & \% \\
+    \midrule
+    0 & 1951 & 42.7 & 473 & 41.4 \\
+    1 & 1327 & 29.0 & 338 & 29.6 \\
+    2 & 1294 & 28.3 & 332 & 29.0 \\
+    \midrule
+    Total & 4572 & 100 & 1143 & 100 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Registros por cluster en entrenamiento y en prueba.}
+  \label{tab:reparto}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.7\textwidth]{clusters_prueba}
+  \caption{Datos de prueba asignados a los clusters. Las X negras son los centroides obtenidos en el entrenamiento.}
+  \label{fig:test}
+\end{figure}
+
+\section{Métricas y matriz de confusión}
+\label{sec:metricas}
+
+\subsection{Métricas seleccionadas}
+
+Como K-Means es clustering, las métricas que usé son las que vimos en clase para evaluar clusters:
+
+\begin{itemize}
+  \item \textbf{Inercia} (distancia intracluster): suma de las distancias al cuadrado de cada punto a su centroide. Entre más chica, más compactos son los clusters. Para poder comparar entrenamiento y prueba, que tienen distinto número de registros, también la divido entre el número de puntos.
+  \item \textbf{Índice de Dunn} (distancia intercluster): mínima distancia entre clusters dividida entre la máxima distancia dentro de un cluster. Entre más grande, más separados están los clusters. Lo calculé tomando la distancia entre centroides como distancia entre clusters y el promedio de la distancia de los puntos a su centroide como distancia dentro del cluster.
+\end{itemize}
+
+Las dos las calculé con mis propias funciones, usando los mismos centroides del entrenamiento (Cuadro~\ref{tab:metricas}).
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{lrr}
+    \toprule
+    Métrica & Entrenamiento & Prueba \\
+    \midrule
+    Registros & 4572 & 1143 \\
+    Inercia total & 3058.87 & 753.81 \\
+    Inercia promedio por punto & 0.6690 & 0.6595 \\
+    Índice de Dunn & 2.1979 & 2.3364 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Métricas de evaluación en entrenamiento y en prueba, calculadas con la implementación manual.}
+  \label{tab:metricas}
+\end{table}
+
+La inercia promedio por punto en prueba (0.6595) es prácticamente igual a la de entrenamiento (0.6690), y el índice de Dunn en prueba (2.34) es incluso un poco mayor. Esto quiere decir que los datos nuevos quedan tan cerca de los centroides como los datos con los que se entrenó, o sea que los centroides no están ajustados solo a la muestra de entrenamiento sino que representan bien los tipos de movimiento en general.
+
+\subsection{Por qué no incluyo una matriz de confusión}
+
+La matriz de confusión compara la clase real de cada dato con la clase que predijo el modelo, y para eso se necesita una etiqueta verdadera. En este proyecto no existe esa etiqueta: no hay una columna que diga si un registro es ``detenido'', ``acelerando'' o ``corriendo''; esos grupos los descubrió el algoritmo. Las únicas categorías del dataset (\texttt{player\_role}, \texttt{player\_position}) no son los clusters que estoy buscando: un mismo receptor puede estar detenido en un frame y a máxima velocidad en otro, así que compararlas contra los clusters no diría nada sobre si K-Means funciona bien o mal. Forzar una matriz de confusión mapeando clusters a roles sería inventar una evaluación que no mide lo que el algoritmo hace. Por eso la evaluación se basa en las métricas de clustering del apartado anterior, que sí miden lo que K-Means trata de lograr: clusters compactos y separados.
+
+\section{Análisis de resultados}
+
+Los resultados muestran que la implementación manual hace lo que se espera de K-Means:
+
+\begin{itemize}
+  \item La inercia baja en cada iteración y el algoritmo se detiene solo cuando los centroides dejan de cambiar (13 iteraciones para $K=3$), que es el criterio de paro que vimos en clase.
+  \item El método del codo, calculado con mi propia inercia, da una curva con la forma esperada y un codo claro en $K=3$.
+  \item Los tres clusters se pueden interpretar sin forzar nada: jugadores casi detenidos, jugadores acelerando y jugadores corriendo a velocidad alta y estable. Es justo lo que uno esperaría de datos de movimiento en una jugada de futbol americano, donde los jugadores arrancan, aceleran y luego mantienen la velocidad.
+  \item Los datos de prueba se reparten entre los clusters casi en la misma proporción que los de entrenamiento (41\,\%, 30\,\%, 29\,\% contra 43\,\%, 29\,\%, 28\,\%), y sus métricas son prácticamente iguales, así que la asignación de datos nuevos funciona bien.
+\end{itemize}
+
+También hay cosas que hay que tener en cuenta. Los clusters no tienen fronteras naturales muy marcadas: la nube de puntos es continua y K-Means simplemente la parte en tres zonas, que es una de las limitaciones del algoritmo que vimos (asume clusters de forma más o menos esférica). El resultado depende de los centroides iniciales; en mi caso son fijos gracias al \texttt{random\_state}, pero con otros puntos iniciales podría converger a una partición un poco distinta. Y como trabajé con una muestra de 1 de cada 50 registros, los números exactos cambiarían con otra muestra, aunque la forma de los clusters debería ser la misma porque la muestra cubre todos los partidos del archivo.
+
+\section{Conclusión}
+
+Implementé K-Means completamente a mano, con funciones sencillas para la distancia euclidiana, la elección de centroides iniciales, la asignación de puntos, la actualización de centroides, las iteraciones y el criterio de paro, además de la asignación de datos nuevos. Todo lo que no es K-Means (leer el dataset, muestrear, estandarizar, separar entrenamiento y prueba y graficar) lo hice con las herramientas que usamos en clase.
+
+Entrené con 4{,}572 registros y probé con 1{,}143 registros que el algoritmo no había visto. Con $K=3$, elegido con el método del codo, obtuve tres tipos de movimiento fáciles de interpretar, y las métricas en prueba (inercia promedio por punto de 0.66 e índice de Dunn de 2.34) son prácticamente iguales a las de entrenamiento, lo que demuestra que los centroides aprendidos sirven para agrupar datos nuevos. Con esto queda demostrado que el algoritmo está bien implementado y funciona para el problema planteado.
+
+\end{document}
