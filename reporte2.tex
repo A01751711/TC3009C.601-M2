@@ -1,0 +1,459 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[hidelinks]{hyperref}
+
+\graphicspath{{figuras/}}
+\emergencystretch=3em
+
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  commentstyle=\color{gray}\itshape,
+  keywordstyle=\color{blue!60!black},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  frame=single,
+  breaklines=true,
+  showstringspaces=false,
+  inputencoding=utf8,
+  extendedchars=true
+}
+
+\begin{document}
+
+\begin{center}
+  {\LARGE\bfseries Clustering jerárquico con scikit-learn sobre datos de tracking de jugadores de la NFL\par}
+  \vspace{0.8em}
+  {\large Momento de Retroalimentación: Módulo 2 --- Uso de framework o biblioteca de aprendizaje máquina para la implementación de una solución (Portafolio Implementación)\par}
+  \vspace{1.2em}
+  Karol Alexis Alvarado Davila --- A01751711\\[0.3em]
+  Inteligencia artificial avanzada para la ciencia de datos\\[0.3em]
+  Grupo TC3009C.601\\[0.3em]
+  Tecnológico de Monterrey\\[0.3em]
+  Martes 8 de septiembre de 2026
+\end{center}
+
+\vspace{1em}
+
+\section{Descripción del dataset}
+
+El dataset que usé es el mismo del proyecto anterior: tracking de jugadores de la NFL (archivo \texttt{input\_2023\_w01.csv}), que corresponde a la semana 1 de la temporada 2023. Tiene 285{,}714 registros y 23 columnas, sin valores nulos. Cada registro es un instante (frame) de un jugador dentro de una jugada, así que un mismo jugador aparece muchas veces: en total hay 16 partidos, 819 jugadas y 737 jugadores distintos, con unos 28 frames por jugador en cada jugada.
+
+Las columnas se pueden agrupar así:
+
+\begin{itemize}
+  \item Identificadores: \texttt{game\_id}, \texttt{play\_id}, \texttt{nfl\_id}, \texttt{frame\_id}.
+  \item Datos del jugador: \texttt{player\_name}, \texttt{player\_height}, \texttt{player\_weight}, \texttt{player\_birth\_date}, \texttt{player\_position}, \texttt{player\_side}, \texttt{player\_role}.
+  \item Contexto de la jugada: \texttt{play\_direction}, \texttt{absolute\_yardline\_number}, \texttt{player\_to\_predict}, \texttt{num\_frames\_output}, \texttt{ball\_land\_x}, \texttt{ball\_land\_y}.
+  \item Movimiento del jugador en ese instante: \texttt{x}, \texttt{y} (posición en el campo, en yardas), \texttt{s} (velocidad, yd/s), \texttt{a} (aceleración, yd/s$^2$), \texttt{dir} (dirección del movimiento, en grados) y \texttt{o} (orientación del cuerpo, en grados).
+\end{itemize}
+
+\section{Variables utilizadas y justificación}
+
+Para el clustering volví a usar solamente la velocidad \texttt{s} y la aceleración \texttt{a} (Cuadro~\ref{tab:vars}). Las razones son las mismas que en el proyecto anterior, y se aplican igual porque el clustering jerárquico también agrupa por distancias: los ids no tienen una distancia con significado, \texttt{x} y \texttt{y} agruparían por zona del campo y no por tipo de movimiento, \texttt{dir} y \texttt{o} son ángulos donde 359$^\circ$ y 1$^\circ$ quedan lejos con la distancia euclidiana, y las columnas categóricas no se pueden meter a una distancia sin inventar números arbitrarios.
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{lrrrrr}
+    \toprule
+    Variable & Media & Desv. est. & Mín. & Mediana & Máx. \\
+    \midrule
+    \texttt{s} (yd/s)     & 3.04 & 2.23 & 0 & 2.73 & 12.53 \\
+    \texttt{a} (yd/s$^2$) & 2.13 & 1.43 & 0 & 1.92 & 17.12 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Estadísticas de las variables utilizadas (285{,}714 registros).}
+  \label{tab:vars}
+\end{table}
+
+Pensé en agregar una tercera variable como \texttt{player\_weight}, pero la descarté por dos motivos. Primero, el peso es una característica fija del jugador, no del movimiento, y mezclarla con \texttt{s} y \texttt{a} haría que los clusters ya no representaran tipos de movimiento sino una combinación de tipo de jugador y movimiento que es más difícil de interpretar. Segundo, al usar exactamente las mismas dos variables y la misma muestra que en el proyecto anterior puedo comparar directamente el resultado del clustering jerárquico contra el de K-Means, que es lo que uso más adelante para la matriz de confusión.
+
+\section{Objetivo del proyecto}
+
+El objetivo es agrupar los registros de tracking según su velocidad y aceleración para encontrar tipos de movimiento parecidos, pero ahora usando el clustering jerárquico aglomerativo del framework \texttt{scikit-learn} (y \texttt{scipy} para el dendrograma), configurando bien sus parámetros: la métrica de distancia, el tipo de linkage y el número de clusters o punto de corte. Sigue siendo un problema de clustering, no de clasificación: no hay una etiqueta correcta que predecir.
+
+\section{Clustering jerárquico aglomerativo}
+
+El clustering jerárquico aglomerativo (bottom-up) funciona como vimos en clase:
+
+\begin{enumerate}
+  \item Cada instancia empieza siendo su propio cluster.
+  \item Se calcula la distancia entre todos los clusters.
+  \item Se unen los dos clusters más cercanos en uno solo.
+  \item Se repite el paso 2 hasta que todo queda en un único cluster.
+\end{enumerate}
+
+El resultado de todas esas uniones es el dendrograma, y el número de clusters se decide con un punto de corte: los clusters son las líneas verticales que cruza el corte. Para decidir qué tan ``cerca'' está un cluster de otro se usa una métrica de linkage. Las que vimos son single (par de puntos más cercano), complete (par más lejano), average (promedio de todos los pares), centroid (distancia entre centroides) y ward, que une los dos clusters cuya unión aumenta menos la varianza (la inercia) dentro de los clusters. La distancia entre puntos es la euclidiana.
+
+Una diferencia importante con K-Means es que el algoritmo aglomerativo no tiene centroides ni una función \texttt{predict}: solo asigna cluster a los datos con los que se construyó el árbol. Por eso para los datos de prueba tuve que agregar un paso de asignación, que explico en la Sección~\ref{sec:prueba}.
+
+\section{Implementación con el framework}
+
+El programa está en \texttt{proyecto.py} y corre desde consola con \texttt{python proyecto.py}. El Cuadro~\ref{tab:herramientas} resume qué herramienta hace cada parte.
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{p{8.3cm}p{6.2cm}}
+    \toprule
+    Parte del proyecto & Cómo se hizo \\
+    \midrule
+    Leer el CSV, explorar y seleccionar \texttt{s} y \texttt{a} & \texttt{pandas} \\
+    Tomar la muestra (1 de cada 50 registros) & slicing de \texttt{pandas} \\
+    Estandarizar las variables & \texttt{StandardScaler} \\
+    Separar entrenamiento y prueba & \texttt{train\_test\_split} \\
+    Clustering jerárquico y comparación de linkages & \texttt{AgglomerativeClustering} de \texttt{sklearn} \\
+    Dendrograma & \texttt{dendrogram} de \texttt{scipy} \\
+    Elección de $K$ & \texttt{silhouette\_score} de \texttt{sklearn} \\
+    Asignación de los datos de prueba a un cluster & centroide más cercano con \texttt{numpy} \\
+    Inercia e índice de Dunn & funciones propias con \texttt{numpy} \\
+    Matriz de confusión contra K-Means & \texttt{KMeans} y \texttt{confusion\_matrix} de \texttt{sklearn} \\
+    Gráficas & \texttt{matplotlib} \\
+    \bottomrule
+  \end{tabular}
+  \caption{Herramientas usadas en cada parte del proyecto.}
+  \label{tab:herramientas}
+\end{table}
+
+Estas son las partes principales del código donde se configura el algoritmo:
+
+\begin{lstlisting}
+# comparacion de linkages con K = 3
+tipos_linkage = ["ward", "complete", "average", "single"]
+for tipo in tipos_linkage:
+    modelo = AgglomerativeClustering(n_clusters=3, metric="euclidean", linkage=tipo)
+    etiquetas = modelo.fit_predict(X_train)
+    print(tipo, silhouette_score(X_train, etiquetas), np.bincount(etiquetas))
+
+# arbol completo para el dendrograma
+modelo_completo = AgglomerativeClustering(distance_threshold=0, n_clusters=None,
+                                          metric="euclidean", linkage="ward")
+modelo_completo = modelo_completo.fit(X_train)
+plot_dendrogram(modelo_completo, truncate_mode="level", p=5)
+
+# modelo final
+modelo = AgglomerativeClustering(n_clusters=3, metric="euclidean", linkage="ward")
+etiquetas_train = modelo.fit_predict(X_train)
+\end{lstlisting}
+
+Los parámetros que usé y por qué:
+
+\begin{itemize}
+  \item \texttt{metric="euclidean"}: la distancia entre puntos que vimos en clase y la única que acepta \texttt{ward}.
+  \item \texttt{linkage="ward"}: elegido después de comparar contra \texttt{complete}, \texttt{average} y \texttt{single} (Sección~\ref{sec:linkage}).
+  \item \texttt{n\_clusters=3}: elegido con el dendrograma y el silhouette (Sección~\ref{sec:k}).
+  \item \texttt{distance\_threshold=0} con \texttt{n\_clusters=None}: solo para el modelo del dendrograma, hace que se construya el árbol completo y se guarden las distancias de cada unión (\texttt{distances\_}), que es lo que necesita \texttt{scipy} para dibujarlo. La función \texttt{plot\_dendrogram} es la que vimos en clase.
+\end{itemize}
+
+Como el algoritmo no tiene \texttt{predict}, las funciones de apoyo que sí escribí yo son:
+
+\begin{itemize}
+  \item \texttt{calcular\_centroides(datos, etiquetas, k)}: promedio de los puntos de cada cluster.
+  \item \texttt{asignar\_clusters(datos, centroides)}: manda cada dato nuevo al centroide más cercano.
+  \item \texttt{inercia} e \texttt{indice\_dunn}: métricas de evaluación (Sección~\ref{sec:metricas}).
+\end{itemize}
+
+Ninguna de ellas es parte del algoritmo de clustering; son para evaluarlo y para usarlo con datos nuevos.
+
+\section{Datos de entrenamiento y datos de prueba}
+
+\subsection{Muestra}
+
+El clustering jerárquico calcula la distancia entre todos los pares de puntos, así que su memoria crece con el cuadrado del número de registros; con los 285{,}714 registros originales no es posible correrlo. Por eso tomé la misma muestra del proyecto anterior: 1 registro de cada 50 usando slicing (\texttt{df[::50]}), que da 5{,}715 registros repartidos entre los 16 partidos del archivo. Con ese tamaño el algoritmo corre en segundos.
+
+\subsection{Escalamiento}
+
+Como el algoritmo usa distancias, estandaricé las dos variables con \texttt{StandardScaler} (media 0 y desviación estándar 1), para que ninguna pese más que la otra solo por tener valores más grandes.
+
+\subsection{Separación}
+
+Separé la muestra con \texttt{train\_test\_split} en 80\,\% para entrenamiento y 20\,\% para prueba, con \texttt{random\_state=1} para que el resultado sea el mismo cada vez que se corre el programa (Cuadro~\ref{tab:split}).
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{lr}
+    \toprule
+    Conjunto & Registros \\
+    \midrule
+    Dataset original & 285{,}714 \\
+    Muestra (1 de cada 50) & 5{,}715 \\
+    Entrenamiento (80\,\%) & 4{,}572 \\
+    Prueba (20\,\%) & 1{,}143 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Datos utilizados para entrenar y para probar.}
+  \label{tab:split}
+\end{table}
+
+El conjunto de \textbf{entrenamiento} se usó para todo lo que es aprender: comparar linkages, construir el dendrograma, elegir $K$ y obtener los clusters finales. El conjunto de \textbf{prueba} no se tocó en nada de eso; solo se usó al final para asignar datos nuevos a los clusters y calcular las métricas sobre datos que el algoritmo no había visto.
+
+\section{Elección del tipo de linkage}
+\label{sec:linkage}
+
+Corrí \texttt{AgglomerativeClustering} con $K=3$ sobre el conjunto de entrenamiento cambiando solo el linkage, y comparé el silhouette y el tamaño de los clusters (Cuadro~\ref{tab:linkage}).
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{lrl}
+    \toprule
+    Linkage & Silhouette & Tamaño de los clusters \\
+    \midrule
+    ward     & 0.3829 & 1236, 1486, 1850 \\
+    complete & 0.3405 & 3084, 264, 1224 \\
+    average  & 0.3456 & 2742, 9, 1821 \\
+    single   & 0.4614 & 4568, 1, 3 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Comparación de linkages con $K=3$ en el conjunto de entrenamiento.}
+  \label{tab:linkage}
+\end{table}
+
+Aquí se ve algo que también vimos en clase: el clustering jerárquico es sensible a los outliers. \texttt{single} tiene el silhouette más alto, pero es engañoso: sus ``clusters'' son un cluster con 4{,}568 puntos y dos con 1 y 3 puntos (los registros con aceleración extrema), así que en realidad no separa nada. \texttt{average} tiene el mismo problema con un cluster de 9 puntos. \texttt{complete} sí da tres grupos de tamaño razonable pero con un silhouette menor. \texttt{ward} da el mejor silhouette entre los que forman clusters de verdad y los tres grupos quedan balanceados, así que ese fue el que usé.
+
+\section{Número de clusters}
+\label{sec:k}
+
+Para escoger $K$ usé las dos herramientas del tema: el dendrograma y el silhouette. La Figura~\ref{fig:dendro} muestra los últimos 5 niveles del dendrograma con linkage ward, y el Cuadro~\ref{tab:uniones} las distancias de las últimas uniones, que son las que definen dónde cortar.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.9\textwidth]{dendrograma}
+  \caption{Dendrograma del conjunto de entrenamiento (ward), truncado a los últimos 5 niveles. Entre paréntesis está el número de puntos de cada rama.}
+  \label{fig:dendro}
+\end{figure}
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{crr}
+    \toprule
+    Unión & Distancia & Clusters que quedan \\
+    \midrule
+    1 & 16.45 & 8 \\
+    2 & 16.47 & 7 \\
+    3 & 22.77 & 6 \\
+    4 & 28.47 & 5 \\
+    5 & 34.54 & 4 \\
+    6 & 39.49 & 3 \\
+    7 & 64.29 & 2 \\
+    8 & 84.52 & 1 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Distancia de las últimas uniones del dendrograma (ward).}
+  \label{tab:uniones}
+\end{table}
+
+Las dos últimas uniones son las más caras: pasar de 3 a 2 clusters cuesta 64.3 y de 2 a 1 cuesta 84.5, mientras que de 4 a 3 solo cuesta 39.5 y hacia abajo las uniones son cada vez más baratas. Un corte a cualquier altura entre 40 y 64 cruza tres líneas verticales, es decir, define 3 clusters, y esa es la franja más ancha del dendrograma donde el número de clusters se mantiene estable.
+
+Para confirmarlo calculé el silhouette con $K$ de 2 a 8 (Cuadro~\ref{tab:sil} y Figura~\ref{fig:sil}). El máximo está en $K=3$, así que ese fue el valor que usé. Además coincide con el $K$ del proyecto anterior, lo que permite comparar los dos métodos.
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{cr}
+    \toprule
+    $K$ & Silhouette \\
+    \midrule
+    2 & 0.3478 \\
+    3 & \textbf{0.3829} \\
+    4 & 0.3628 \\
+    5 & 0.3495 \\
+    6 & 0.3521 \\
+    7 & 0.3207 \\
+    8 & 0.3123 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Silhouette en el conjunto de entrenamiento para cada valor de $K$ (ward).}
+  \label{tab:sil}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.62\textwidth]{silhouette}
+  \caption{Silhouette contra número de clusters.}
+  \label{fig:sil}
+\end{figure}
+
+\section{Resultados del entrenamiento}
+
+Con \texttt{n\_clusters=3}, \texttt{linkage="ward"} y \texttt{metric="euclidean"} el modelo hizo 4{,}571 uniones (una menos que el número de puntos, como debe ser) y dejó tres clusters. El Cuadro~\ref{tab:centroides} muestra el centroide de cada uno, calculado como el promedio de sus puntos: primero en las unidades escaladas y después en unidades originales, que es lo que permite interpretarlos.
+
+\begin{table}[H]
+  \centering
+  \small
+  \begin{tabular}{ccrrrl}
+    \toprule
+    Cluster & Centroide escalado $(s, a)$ & Registros & $\bar{s}$ (yd/s) & $\bar{a}$ (yd/s$^2$) & Interpretación \\
+    \midrule
+    0 & $(-0.247,\ 1.138)$  & 1236 & 2.51 & 3.71 & Acelerando \\
+    1 & $(-0.946,\ -0.862)$ & 1486 & 0.94 & 0.88 & Detenido o caminando \\
+    2 & $(0.906,\ -0.070)$  & 1850 & 5.11 & 2.00 & Corriendo rápido y estable \\
+    \bottomrule
+  \end{tabular}
+  \caption{Centroides y descripción de cada cluster en el conjunto de entrenamiento.}
+  \label{tab:centroides}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.7\textwidth]{clusters_entrenamiento}
+  \caption{Clusters jerárquicos en el conjunto de entrenamiento. Cada color es un cluster y la X negra es su centroide.}
+  \label{fig:train}
+\end{figure}
+
+En la Figura~\ref{fig:train} se ve que los tres grupos ocupan las mismas zonas del plano velocidad--aceleración que encontró K-Means: uno en la esquina de valores bajos, uno a la derecha (velocidad alta) y uno arriba (aceleración alta). Lo que cambia es dónde quedan las fronteras: el cluster de velocidad alta es más grande aquí (1{,}850 registros contra 1{,}327) porque ward le asignó una parte de los registros con velocidad media que K-Means dejaba en el cluster de detenidos. Los números de cluster también son distintos (aquí el 1 es el de detenidos), porque cada algoritmo numera sus grupos en el orden en que los encuentra.
+
+\section{Asignación de los datos de prueba}
+\label{sec:prueba}
+
+Como \texttt{AgglomerativeClustering} no tiene \texttt{predict}, para usar el modelo con datos nuevos calculé el centroide de cada cluster del entrenamiento y asigné cada registro de prueba al centroide más cercano con distancia euclidiana (función \texttt{asignar\_clusters}). Es la forma natural de extender un cluster a datos nuevos: un registro pertenece al grupo cuyo ``punto típico'' le queda más cerca, y el árbol no se recalcula. El Cuadro~\ref{tab:ejemplos} muestra los primeros 10 registros de prueba con el cluster que les tocó.
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{rrlc}
+    \toprule
+    $s$ (yd/s) & $a$ (yd/s$^2$) & Rol del jugador & Cluster asignado \\
+    \midrule
+    0.65 & 2.60 & Defensive Coverage & 0 \\
+    3.55 & 0.37 & Defensive Coverage & 1 \\
+    6.78 & 3.64 & Other Route Runner & 2 \\
+    2.45 & 2.33 & Passer             & 0 \\
+    1.78 & 3.10 & Defensive Coverage & 0 \\
+    0.18 & 1.80 & Passer             & 1 \\
+    1.45 & 1.53 & Defensive Coverage & 1 \\
+    6.20 & 2.22 & Defensive Coverage & 2 \\
+    1.75 & 1.49 & Defensive Coverage & 1 \\
+    0.89 & 2.13 & Defensive Coverage & 1 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Ejemplos de registros de prueba y el cluster asignado.}
+  \label{tab:ejemplos}
+\end{table}
+
+Las asignaciones tienen sentido: los registros con velocidad alta (6.78 y 6.20) quedan en el cluster 2, los de aceleración alta (2.60, 2.33, 3.10) en el cluster 0 y los casi detenidos en el cluster 1. El Cuadro~\ref{tab:reparto} compara el reparto entre clusters en entrenamiento y en prueba, y la Figura~\ref{fig:test} muestra los datos de prueba con su cluster.
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{crrrr}
+    \toprule
+    Cluster & Entrenamiento & \% & Prueba & \% \\
+    \midrule
+    0 & 1236 & 27.0 & 334 & 29.2 \\
+    1 & 1486 & 32.5 & 407 & 35.6 \\
+    2 & 1850 & 40.5 & 402 & 35.2 \\
+    \midrule
+    Total & 4572 & 100 & 1143 & 100 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Registros por cluster en entrenamiento y en prueba.}
+  \label{tab:reparto}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.7\textwidth]{clusters_prueba}
+  \caption{Datos de prueba asignados a los clusters. Las X negras son los centroides obtenidos en el entrenamiento.}
+  \label{fig:test}
+\end{figure}
+
+\section{Métricas y matriz de confusión}
+\label{sec:metricas}
+
+\subsection{Métricas seleccionadas}
+
+Usé tres métricas de clustering, dos del tema y una más del framework:
+
+\begin{itemize}
+  \item \textbf{Silhouette} (\texttt{silhouette\_score} de \texttt{sklearn}): compara qué tan cerca está cada punto de su propio cluster contra qué tan cerca está del cluster vecino más próximo. Va de $-1$ a 1; entre más alto, mejor definidos los clusters.
+  \item \textbf{Inercia} (distancia intracluster): suma de las distancias al cuadrado de cada punto a su centroide. Entre más chica, más compactos son los clusters. La divido entre el número de puntos para poder comparar entrenamiento y prueba.
+  \item \textbf{Índice de Dunn} (distancia intercluster): mínima distancia entre centroides dividida entre la máxima distancia promedio de los puntos a su centroide. Entre más grande, más separados están los clusters.
+\end{itemize}
+
+Las tres se calcularon con los mismos centroides del entrenamiento (Cuadro~\ref{tab:metricas}).
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{lrr}
+    \toprule
+    Métrica & Entrenamiento & Prueba \\
+    \midrule
+    Registros & 4572 & 1143 \\
+    Silhouette & 0.3829 & 0.4205 \\
+    Inercia total & 3591.99 & 801.03 \\
+    Inercia promedio por punto & 0.7856 & 0.7008 \\
+    Índice de Dunn & 1.7520 & 1.9810 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Métricas de evaluación en entrenamiento y en prueba.}
+  \label{tab:metricas}
+\end{table}
+
+Las métricas en prueba son iguales o un poco mejores que en entrenamiento: la inercia por punto baja de 0.79 a 0.70, y el silhouette y el Dunn suben. Esto quiere decir que los centroides que salieron del árbol representan bien los tipos de movimiento en general y no solo a la muestra de entrenamiento. Que las métricas de prueba sean ligeramente mejores tiene una explicación: los puntos de prueba se asignaron al centroide más cercano, que es la asignación que minimiza la inercia por construcción, mientras que en entrenamiento las etiquetas las decidió el árbol de ward, que junta grupos completos y puede dejar algún punto más cerca de otro centroide que del suyo.
+
+\subsection{Matriz de confusión}
+
+Este proyecto no tiene una etiqueta verdadera contra la cual medir aciertos: no existe una columna que diga si un registro es ``detenido'', ``acelerando'' o ``corriendo'', y las categorías del dataset (\texttt{player\_role}, \texttt{player\_position}) no describen movimiento, porque un mismo receptor puede estar parado en un frame y a máxima velocidad en otro. Por eso una matriz de confusión contra esas columnas no mediría nada útil.
+
+Lo que sí es una comparación válida es confrontar los clusters del jerárquico contra los de otro algoritmo sobre exactamente los mismos datos. Entrené \texttt{KMeans} de \texttt{sklearn} con $K=3$ sobre el mismo conjunto de entrenamiento y usé \texttt{confusion\_matrix} de \texttt{sklearn} para cruzar las dos etiquetas. Como cada método numera sus clusters en un orden distinto, primero emparejé cada cluster jerárquico con el cluster de K-Means con el que comparte más registros. El Cuadro~\ref{tab:confusion} muestra el resultado en entrenamiento y en prueba (en prueba, las etiquetas de K-Means vienen de su \texttt{predict} y las del jerárquico de \texttt{asignar\_clusters}).
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{lrrrcrrr}
+    \toprule
+    & \multicolumn{3}{c}{K-Means (entrenamiento)} & & \multicolumn{3}{c}{K-Means (prueba)} \\
+    \cmidrule{2-4} \cmidrule{6-8}
+    Jerárquico & Acelerando & Detenido & Corriendo & & Acelerando & Detenido & Corriendo \\
+    \midrule
+    Acelerando & \textbf{935} & 293  & 8    & & \textbf{299} & 35  & 0 \\
+    Detenido   & 0   & \textbf{1486} & 0    & & 0   & \textbf{407} & 0 \\
+    Corriendo  & 361 & 172  & \textbf{1317} & & 33  & 31  & \textbf{338} \\
+    \bottomrule
+  \end{tabular}
+  \caption{Matriz de confusión entre los clusters del jerárquico (filas) y los de K-Means (columnas). La diagonal son los registros en los que los dos métodos coinciden.}
+  \label{tab:confusion}
+\end{table}
+
+La concordancia (suma de la diagonal entre el total) es de 81.8\,\% en entrenamiento y 91.3\,\% en prueba. Leyendo la matriz:
+
+\begin{itemize}
+  \item El cluster de \emph{detenidos} es idéntico en los dos métodos: los 1{,}486 registros que ward puso ahí también los puso K-Means, y en prueba pasa lo mismo con los 407.
+  \item Los desacuerdos están en las fronteras entre \emph{acelerando} y \emph{corriendo} (361 registros) y entre \emph{acelerando} y \emph{detenido} (293). Son los registros con velocidad y aceleración medias, que están en la zona continua entre los grupos y que cualquiera de los dos métodos podría poner de un lado o del otro.
+  \item La concordancia sube en prueba porque ahí los dos métodos asignan por centroide más cercano, y la única diferencia que queda es la posición de los centroides.
+\end{itemize}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.7\textwidth]{clusters_kmeans}
+  \caption{Los mismos datos de entrenamiento agrupados por K-Means de \texttt{sklearn}, con los números de cluster ya emparejados con los del jerárquico. Compárese con la Figura~\ref{fig:train}.}
+  \label{fig:kmeans}
+\end{figure}
+
+Es importante decir qué mide y qué no mide esta matriz: mide qué tanto coinciden dos algoritmos distintos, no cuál de los dos está ``bien'', porque ninguno tiene la respuesta correcta. Que dos métodos que funcionan de forma muy distinta (uno mueve centroides, el otro une vecinos de abajo hacia arriba) lleguen a los mismos tres grupos con un acuerdo de más del 80\,\% es evidencia de que los tres tipos de movimiento están de verdad en los datos y no son un artefacto de un algoritmo en particular.
+
+\section{Análisis de resultados}
+
+Los resultados muestran que el framework quedó bien configurado y que el algoritmo hace lo que se espera:
+
+\begin{itemize}
+  \item La comparación de linkages muestra por qué la elección de parámetros importa: con \texttt{single} y \texttt{average} el algoritmo se deja llevar por los outliers y forma clusters de 1, 3 o 9 puntos; con \texttt{ward} los tres grupos quedan balanceados y con el mejor silhouette entre los linkages que sí separan algo.
+  \item El dendrograma tiene un salto claro: la unión de 3 a 2 clusters cuesta 64.3 contra 39.5 de la anterior, y el silhouette confirma el máximo en $K=3$. Dos criterios independientes llevan al mismo $K$.
+  \item Los tres clusters se interpretan sin forzar nada: detenido o caminando, acelerando y corriendo rápido y estable, igual que en el proyecto anterior.
+  \item Los datos de prueba se asignan con métricas iguales o mejores que las de entrenamiento, y la matriz de confusión contra K-Means da una concordancia de 82\,\% en entrenamiento y 91\,\% en prueba, con el cluster de detenidos idéntico entre métodos.
+\end{itemize}
+
+También hay que tener en cuenta las limitaciones. El silhouette de 0.38 no es alto: como ya vimos con K-Means, la nube de velocidad--aceleración es continua y no tiene fronteras naturales muy marcadas, así que cualquier partición en tres deja puntos ambiguos en los bordes; la matriz de confusión los ubica justo ahí. El clustering jerárquico además es más costoso que K-Means (memoria cuadrática), por eso trabajé con la muestra de 5{,}715 registros y no con el dataset completo. Y como el algoritmo no tiene \texttt{predict}, la asignación de datos nuevos por centroide más cercano es una aproximación: es la extensión más razonable, pero un punto nuevo podría haber quedado en otra rama si hubiera estado en el árbol desde el principio.
+
+\section{Conclusión}
+
+Implementé clustering jerárquico aglomerativo con \texttt{AgglomerativeClustering} de \texttt{scikit-learn} y \texttt{scipy} para el dendrograma, sobre 4{,}572 registros de entrenamiento y 1{,}143 de prueba del dataset de tracking de la NFL. Configuré el algoritmo comparando cuatro tipos de linkage, construyendo el árbol completo con \texttt{distance\_threshold=0} para leer el dendrograma, y eligiendo $K=3$ con el punto de corte y el silhouette. Como el algoritmo no predice datos nuevos, agregué la asignación por centroide más cercano.
+
+Con \texttt{linkage="ward"} y $K=3$ obtuve los mismos tres tipos de movimiento que K-Means, con silhouette de 0.42, inercia por punto de 0.70 e índice de Dunn de 1.98 en prueba, y una concordancia de 91\,\% con K-Means en los datos de prueba. Con esto queda demostrado que sé configurar el algoritmo del framework, que el modelo generaliza a datos que no había visto y que los grupos encontrados son consistentes entre dos métodos distintos.
+
+\end{document}
